@@ -5,6 +5,15 @@ import requests
 import re
 import time
 
+MANIFEST_REPO = 'SteamAutoCracks/ManifestHub'
+GITHUB_API_BASE = f'https://api.github.com/repos/{MANIFEST_REPO}'
+GITHUB_ARCHIVE_BASE = f'https://codeload.github.com/{MANIFEST_REPO}/zip/refs/heads'
+REQUEST_HEADERS = {
+    'Accept': 'application/vnd.github+json',
+    'User-Agent': 'ManifestHubDownloader/1.0',
+}
+RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+
 def clear_screen():
     """Clear the terminal screen."""
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -82,15 +91,85 @@ def validate_appid(appid):
     """Validate that the input is a numeric AppID."""
     return bool(re.match(r'^[0-9]+$', appid))
 
+def build_manifest_api_url(appid):
+    """Build the GitHub API URL used to check manifest branches."""
+    return f'{GITHUB_API_BASE}/branches/{appid}'
+
+def build_download_url(appid):
+    """Build the direct archive URL for a manifest branch."""
+    return f'{GITHUB_ARCHIVE_BASE}/{appid}'
+
 def check_manifest(appid):
-    """Check if manifest exists in the GitHub repository."""
-    url = f'https://api.github.com/repos/SteamAutoCracks/ManifestHub/branches/{appid}'
-    
-    try:
-        response = requests.get(url, timeout=10)
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
+    """Check if a manifest exists, with a fallback to the direct archive URL."""
+    api_url = build_manifest_api_url(appid)
+    download_url = build_download_url(appid)
+    details = []
+
+    for attempt in range(2):
+        try:
+            response = requests.get(api_url, headers=REQUEST_HEADERS, timeout=10)
+        except requests.RequestException as error:
+            details.append(f'GitHub API request failed ({error.__class__.__name__}).')
+        else:
+            if response.status_code == 200:
+                return {
+                    'status': 'found',
+                    'download_url': download_url,
+                    'source': 'github_api',
+                }
+
+            if response.status_code == 404:
+                return {
+                    'status': 'not_found',
+                    'download_url': download_url,
+                    'source': 'github_api',
+                }
+
+            details.append(f'GitHub API returned HTTP {response.status_code}.')
+            if response.status_code not in RETRYABLE_STATUS_CODES:
+                break
+
+        if attempt == 0:
+            time.sleep(0.7)
+
+    for attempt in range(2):
+        try:
+            response = requests.head(
+                download_url,
+                headers=REQUEST_HEADERS,
+                timeout=10,
+                allow_redirects=True,
+            )
+        except requests.RequestException as error:
+            details.append(f'Direct archive check failed ({error.__class__.__name__}).')
+        else:
+            if response.status_code == 200:
+                return {
+                    'status': 'found',
+                    'download_url': download_url,
+                    'source': 'archive_url',
+                }
+
+            if response.status_code == 404:
+                return {
+                    'status': 'not_found',
+                    'download_url': download_url,
+                    'source': 'archive_url',
+                }
+
+            details.append(f'Direct archive check returned HTTP {response.status_code}.')
+            if response.status_code not in RETRYABLE_STATUS_CODES:
+                break
+
+        if attempt == 0:
+            time.sleep(0.7)
+
+    return {
+        'status': 'check_failed',
+        'download_url': download_url,
+        'source': 'archive_url',
+        'detail': ' '.join(dict.fromkeys(details)) or 'GitHub could not verify the manifest.',
+    }
 
 def get_game_metadata(appid):
     """Fetch game title and LAN support details from Steam's appdetails API."""
@@ -102,7 +181,7 @@ def get_game_metadata(appid):
     }
 
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(url, params=params, headers=REQUEST_HEADERS, timeout=10)
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError):
@@ -177,8 +256,10 @@ def main():
         print()
         print_green('> Searching database...')
         print()
-        
-        if not check_manifest(appid):
+
+        manifest_result = check_manifest(appid)
+
+        if manifest_result['status'] == 'not_found':
             print_green('> Manifest not found.')
             print()
             print()
@@ -187,10 +268,34 @@ def main():
             print()
             input_green('Press ENTER to continue...')
             continue
+
+        if manifest_result['status'] != 'found':
+            print_green('> GitHub could not verify this manifest right now.')
+            print()
+            print_green('> ' + manifest_result['detail'])
+            print()
+            print_green('> You can still try the direct download link below.')
+            print()
+            print()
+            print_green('Download link:')
+            print()
+            print_green(manifest_result['download_url'])
+            print()
+            print()
+            print_green('The manifests are downloaded from the ManifestHub Database.')
+            print()
+            print_green('Show them support on GitHub: https://github.com/SteamAutoCracks/ManifestHub/')
+            print()
+            print()
+            input_green('Press ENTER to continue...')
+            continue
         
         game_metadata = get_game_metadata(appid)
 
-        print_green('> Manifest found in database!')
+        if manifest_result['source'] == 'github_api':
+            print_green('> Manifest found in database!')
+        else:
+            print_green('> Manifest found via direct archive check!')
         print()
         if game_metadata and game_metadata.get('name'):
             print_green('> Game identified: ' + game_metadata['name'])
@@ -213,7 +318,7 @@ def main():
         print()
         print_green('Download link:')
         print()
-        print_green(f'https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/{appid}')
+        print_green(manifest_result['download_url'])
         print()
         print()
         print_green('The manifests are downloaded from the ManifestHub Database.')

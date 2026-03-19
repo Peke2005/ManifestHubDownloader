@@ -182,11 +182,13 @@
                 <div id="downloadSection" class="hidden text-center">
                     <a 
                         id="downloadLink"
+                        target="_blank"
+                        rel="noopener noreferrer"
                         class="inline-block orbitron bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white font-bold py-4 px-8 rounded-lg transition-all duration-300 transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-50"
                     >
-                        <i class="fas fa-download mr-2"></i> DOWNLOAD MANIFEST
+                        <i class="fas fa-download mr-2"></i> <span id="downloadLabel">DOWNLOAD MANIFEST</span>
                     </a>
-                    <p class="text-slate-300 mt-3 text-sm">File are downloaded from the <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a></p>
+                    <p id="downloadHint" class="text-slate-300 mt-3 text-sm">Files are downloaded from the <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a></p>
                 </div>
                 
                 <div id="notFoundSection" class="hidden text-center py-6">
@@ -251,7 +253,14 @@
             const terminalOutput = document.getElementById('terminalOutput');
             const downloadSection = document.getElementById('downloadSection');
             const downloadLink = document.getElementById('downloadLink');
+            const downloadLabel = document.getElementById('downloadLabel');
+            const downloadHint = document.getElementById('downloadHint');
             const notFoundSection = document.getElementById('notFoundSection');
+            const manifestApiBase = 'https://api.github.com/repos/SteamAutoCracks/ManifestHub';
+            const manifestDownloadBase = 'https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads';
+            const retryableStatusCodes = new Set([403, 429, 500, 502, 503, 504]);
+            const defaultDownloadHint = 'Files are downloaded from the <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a>.';
+            const degradedDownloadHint = 'GitHub could not verify the branch right now. You can still try the direct archive from <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a>.';
             
             checkBtn.addEventListener('click', checkManifest);
             gameIdInput.addEventListener('keypress', function(e) {
@@ -259,6 +268,144 @@
                     checkManifest();
                 }
             });
+
+            function buildDownloadUrl(gameId) {
+                return `${manifestDownloadBase}/${encodeURIComponent(gameId)}`;
+            }
+
+            function sleep(ms) {
+                return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+                try {
+                    return await fetch(url, { ...options, signal: controller.signal });
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            }
+
+            async function readGithubError(response) {
+                try {
+                    const payload = await response.json();
+                    if (payload && typeof payload.message === 'string' && payload.message.trim()) {
+                        return payload.message.trim();
+                    }
+                } catch (error) {
+                    // Ignore JSON parsing errors and fall back to a generic message.
+                }
+
+                return `GitHub returned HTTP ${response.status}.`;
+            }
+
+            async function getManifestStatus(gameId) {
+                const apiUrl = `${manifestApiBase}/branches/${encodeURIComponent(gameId)}`;
+                const downloadUrl = buildDownloadUrl(gameId);
+                let lastMessage = 'GitHub could not verify the manifest right now.';
+
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    try {
+                        const response = await fetchWithTimeout(apiUrl, {
+                            headers: {
+                                Accept: 'application/vnd.github+json',
+                            },
+                        });
+
+                        if (response.status === 200) {
+                            return { status: 'found', downloadUrl };
+                        }
+
+                        if (response.status === 404) {
+                            return { status: 'not_found', downloadUrl };
+                        }
+
+                        lastMessage = await readGithubError(response);
+                        if (!retryableStatusCodes.has(response.status) || attempt === 1) {
+                            break;
+                        }
+                    } catch (error) {
+                        lastMessage = error.name === 'AbortError'
+                            ? 'GitHub timed out while checking the manifest.'
+                            : 'Network error while contacting GitHub.';
+
+                        if (attempt === 1) {
+                            break;
+                        }
+                    }
+
+                    await sleep(700);
+                }
+
+                return {
+                    status: 'check_unavailable',
+                    downloadUrl,
+                    message: lastMessage,
+                };
+            }
+
+            function setCheckingState() {
+                checkBtn.disabled = true;
+                checkBtn.classList.remove(
+                    'pulse-animation',
+                    'from-green-600',
+                    'to-emerald-600',
+                    'hover:from-green-500',
+                    'hover:to-emerald-500',
+                );
+                checkBtn.classList.add(
+                    'from-blue-600',
+                    'to-purple-600',
+                    'hover:from-blue-500',
+                    'hover:to-purple-500',
+                );
+                checkBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> CHECKING...';
+            }
+
+            function resetCheckButton() {
+                checkBtn.disabled = false;
+                checkBtn.classList.remove(
+                    'from-green-600',
+                    'to-emerald-600',
+                    'hover:from-green-500',
+                    'hover:to-emerald-500',
+                );
+                checkBtn.classList.add(
+                    'from-blue-600',
+                    'to-purple-600',
+                    'hover:from-blue-500',
+                    'hover:to-purple-500',
+                    'pulse-animation',
+                );
+                checkBtn.innerHTML = 'CHECK MANIFEST';
+            }
+
+            function setSuccessState() {
+                checkBtn.disabled = false;
+                checkBtn.classList.remove(
+                    'pulse-animation',
+                    'from-blue-600',
+                    'to-purple-600',
+                    'hover:from-blue-500',
+                    'hover:to-purple-500',
+                );
+                checkBtn.classList.add(
+                    'from-green-600',
+                    'to-emerald-600',
+                    'hover:from-green-500',
+                    'hover:to-emerald-500',
+                );
+                checkBtn.innerHTML = '<i class="fas fa-check-circle mr-2"></i> CHECK COMPLETE';
+            }
+
+            function showDownloadAction(downloadUrl, label, hintHtml) {
+                downloadLink.href = downloadUrl;
+                downloadLabel.textContent = label;
+                downloadHint.innerHTML = hintHtml;
+                downloadSection.classList.remove('hidden');
+            }
             
             async function checkManifest() {
                 const gameId = gameIdInput.value.trim();
@@ -269,9 +416,7 @@
                 }
                 
                 // Show loading state
-                checkBtn.disabled = true;
-                checkBtn.classList.remove('pulse-animation');
-                checkBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i> CHECKING...';
+                setCheckingState();
                 
                 // Clear previous results
                 resultsSection.classList.remove('hidden');
@@ -283,39 +428,37 @@
                 await typeText(`> Initiating manifest check for Steam AppID: ${gameId}\n`);
                 await typeText(`> Searching database...\n`);
                 
-                // Check if manifest exists using GitHub API
-                try {
-                    const response = await fetch(`https://api.github.com/repos/SteamAutoCracks/ManifestHub/branches/${gameId}`);
-                    
-                    if (response.status === 200) {
-                        // Manifest found
-                        await typeText(`> Manifest found in database!\n`);
-                        await typeText(`> Preparing download link...\n`);
-                        await typeText(`> Ready for download.\n`);
-                        
-                        const githubUrl = `https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads/${gameId}`;
-                        downloadLink.href = githubUrl;
-                        downloadSection.classList.remove('hidden');
-                        
-                        checkBtn.innerHTML = '<i class="fas fa-check-circle mr-2"></i> CHECK COMPLETE';
-                        checkBtn.classList.remove('from-blue-600', 'to-purple-600');
-                        checkBtn.classList.add('from-green-600', 'to-emerald-600');
-                    } else {
-                        // Manifest not found
-                        await typeText(`> Manifest not found.\n`);
-                        notFoundSection.classList.remove('hidden');
-                        
-                        checkBtn.innerHTML = 'CHECK MANIFEST';
-                        checkBtn.classList.add('pulse-animation');
-                    }
-                } catch (error) {
-                    // Error during fetch
-                    await typeText(`> Error checking manifest. Please try again.\n`);
-                    checkBtn.innerHTML = 'CHECK MANIFEST';
-                    checkBtn.classList.add('pulse-animation');
+                const manifestStatus = await getManifestStatus(gameId);
+
+                if (manifestStatus.status === 'found') {
+                    await typeText(`> Manifest found in database!\n`);
+                    await typeText(`> Preparing download link...\n`);
+                    await typeText(`> Ready for download.\n`);
+                    showDownloadAction(
+                        manifestStatus.downloadUrl,
+                        'DOWNLOAD MANIFEST',
+                        defaultDownloadHint,
+                    );
+                    setSuccessState();
+                    return;
                 }
-                
-                checkBtn.disabled = false;
+
+                if (manifestStatus.status === 'not_found') {
+                    await typeText(`> Manifest not found.\n`);
+                    notFoundSection.classList.remove('hidden');
+                    resetCheckButton();
+                    return;
+                }
+
+                await typeText(`> GitHub could not verify the manifest right now.\n`);
+                await typeText(`> ${manifestStatus.message}\n`);
+                await typeText(`> You can still try the direct download link below.\n`);
+                showDownloadAction(
+                    manifestStatus.downloadUrl,
+                    'TRY DIRECT DOWNLOAD',
+                    degradedDownloadHint,
+                );
+                resetCheckButton();
             }
             
             function typeText(text) {
@@ -338,6 +481,7 @@
                 resultsSection.classList.remove('hidden');
                 downloadSection.classList.add('hidden');
                 notFoundSection.classList.add('hidden');
+                resetCheckButton();
             }
         });
     </script>
