@@ -258,6 +258,8 @@
             const notFoundSection = document.getElementById('notFoundSection');
             const manifestApiBase = 'https://api.github.com/repos/SteamAutoCracks/ManifestHub';
             const manifestDownloadBase = 'https://codeload.github.com/SteamAutoCracks/ManifestHub/zip/refs/heads';
+            const steamAppDetailsProxyBase = 'https://r.jina.ai/http://https://store.steampowered.com/api/appdetails';
+            const steamStorePageProxyBase = 'https://r.jina.ai/http://https://store.steampowered.com/app';
             const retryableStatusCodes = new Set([403, 429, 500, 502, 503, 504]);
             const defaultDownloadHint = 'Files are downloaded from the <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a>.';
             const degradedDownloadHint = 'GitHub could not verify the branch right now. You can still try the direct archive from <a href="https://github.com/SteamAutoCracks/ManifestHub/" class="text-purple-400 hover:text-purple-300 transition-colors">ManifestHub</a>.';
@@ -275,6 +277,17 @@
 
             function sleep(ms) {
                 return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            function extractFirstJsonObject(text) {
+                const firstBrace = text.indexOf('{');
+                const lastBrace = text.lastIndexOf('}');
+
+                if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) {
+                    return null;
+                }
+
+                return text.slice(firstBrace, lastBrace + 1);
             }
 
             async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
@@ -344,6 +357,74 @@
                     downloadUrl,
                     message: lastMessage,
                 };
+            }
+
+            async function getSteamMetadata(gameId) {
+                const metadataUrl = `${steamAppDetailsProxyBase}?appids=${encodeURIComponent(gameId)}&filters=categories&l=english`;
+
+                try {
+                    const response = await fetchWithTimeout(metadataUrl, {}, 15000);
+                    if (!response.ok) {
+                        return null;
+                    }
+
+                    const rawText = await response.text();
+                    const jsonText = extractFirstJsonObject(rawText);
+                    if (!jsonText) {
+                        return null;
+                    }
+
+                    const payload = JSON.parse(jsonText);
+                    const appData = payload?.[gameId];
+                    const data = appData?.success ? appData.data : null;
+                    if (!data || typeof data !== 'object') {
+                        return null;
+                    }
+
+                    const categories = Array.isArray(data.categories)
+                        ? data.categories
+                            .map((category) => typeof category?.description === 'string' ? category.description.trim() : null)
+                            .filter(Boolean)
+                        : [];
+
+                    const lanCategories = categories.filter((description) => description.startsWith('LAN '));
+                    const connectionCategories = categories.filter((description) => (
+                        description === 'Multi-player'
+                        || description === 'Co-op'
+                        || description === 'PvP'
+                        || description === 'Cross-Platform Multiplayer'
+                        || description === 'Remote Play Together'
+                        || description.startsWith('Online ')
+                        || description.startsWith('LAN ')
+                    ));
+
+                    let name = null;
+                    try {
+                        const titleResponse = await fetchWithTimeout(
+                            `${steamStorePageProxyBase}/${encodeURIComponent(gameId)}/?l=english`,
+                            {},
+                            15000,
+                        );
+
+                        if (titleResponse.ok) {
+                            const titleText = await titleResponse.text();
+                            const titleMatch = titleText.match(/\*\*Title:\*\*\s*(.+)/);
+                            if (titleMatch && typeof titleMatch[1] === 'string') {
+                                name = titleMatch[1].trim() || null;
+                            }
+                        }
+                    } catch (error) {
+                        // Keep name optional. Connection categories are the priority.
+                    }
+
+                    return {
+                        name,
+                        lanCategories,
+                        connectionCategories: [...new Set(connectionCategories)],
+                    };
+                } catch (error) {
+                    return null;
+                }
             }
 
             function setCheckingState() {
@@ -432,6 +513,32 @@
 
                 if (manifestStatus.status === 'found') {
                     await typeText(`> Manifest found in database!\n`);
+                    await typeText(`> Resolving game details...\n`);
+
+                    const steamMetadata = await getSteamMetadata(gameId);
+                    if (steamMetadata?.name) {
+                        await typeText(`> Game identified: ${steamMetadata.name}\n`);
+                    } else {
+                        await typeText(`> Game title unavailable.\n`);
+                    }
+
+                    if (steamMetadata) {
+                        if (steamMetadata.connectionCategories.length > 0) {
+                            await typeText(`> Connection features: ${steamMetadata.connectionCategories.join(', ')}\n`);
+                        } else {
+                            await typeText(`> Connection features: Not listed on Steam.\n`);
+                        }
+
+                        if (steamMetadata.lanCategories.length > 0) {
+                            await typeText(`> LAN support: Yes (${steamMetadata.lanCategories.join(', ')})\n`);
+                        } else {
+                            await typeText(`> LAN support: No\n`);
+                        }
+                    } else {
+                        await typeText(`> Connection details unavailable.\n`);
+                        await typeText(`> LAN support unavailable.\n`);
+                    }
+
                     await typeText(`> Preparing download link...\n`);
                     await typeText(`> Ready for download.\n`);
                     showDownloadAction(
